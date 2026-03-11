@@ -10,109 +10,148 @@ Uses the Screener page's global search autocomplete:
 import json
 import sys
 import asyncio
+import os
 from pathlib import Path
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from utils.storage import get_storage_state_path
 
-SCRIPT_TIMEOUT_SECONDS = 70
-NAVIGATION_TIMEOUT_MS = 25000
-SELECTOR_TIMEOUT_MS = 8000
+def _env_int(name: str, default: int, minimum: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, value)
+
+
+SCRIPT_TIMEOUT_SECONDS = _env_int("SEARCH_SCRIPT_TIMEOUT_SECONDS", 60, 20)
+NAVIGATION_TIMEOUT_MS = _env_int("SEARCH_NAVIGATION_TIMEOUT_MS", 18000, 5000)
+SELECTOR_TIMEOUT_MS = _env_int("SEARCH_SELECTOR_TIMEOUT_MS", 8000, 2000)
+SEARCH_BASE_URLS = [
+    url.strip().rstrip("/")
+    for url in os.getenv("SEARCH_BASE_URLS", "https://stocks.ddns.net,http://stocks.ddns.net").split(",")
+    if url.strip()
+]
+
+
+async def _route_handler(route):
+    if route.request.resource_type in {"image", "font", "media"}:
+        await route.abort()
+        return
+    await route.continue_()
 
 
 async def _search_impl(stock_id: str, state_path: str) -> dict:
     """Actual Playwright flow."""
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--no-zygote",
-            ],
-        )
-        context = await browser.new_context(
-            storage_state=state_path,
-            viewport={"width": 1280, "height": 720},
-        )
-        page = await context.new_page()
-        page.set_default_timeout(SELECTOR_TIMEOUT_MS)
+        try:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-zygote",
+                ],
+            )
+        except Exception as e:
+            return {"status": "error", "message": f"瀏覽器啟動失敗：{type(e).__name__}: {e}"}
 
         try:
-            await page.goto(
-                "https://stocks.ddns.net/Screener.aspx",
-                wait_until="domcontentloaded",
-                timeout=NAVIGATION_TIMEOUT_MS,
+            context = await browser.new_context(
+                storage_state=state_path,
+                viewport={"width": 1280, "height": 720},
             )
+            page = await context.new_page()
+            await page.route("**/*", _route_handler)
+            page.set_default_timeout(SELECTOR_TIMEOUT_MS)
 
-            if "login" in page.url.lower():
-                return {"status": "error", "message": "Cookies 已過期，請重新執行 scripts/login_save_cookies.py 手動登入。"}
+            errors: list[str] = []
+            for base_url in SEARCH_BASE_URLS:
+                try:
+                    await page.goto(
+                        f"{base_url}/Screener.aspx",
+                        wait_until="domcontentloaded",
+                        timeout=NAVIGATION_TIMEOUT_MS,
+                    )
 
-            await page.wait_for_selector("#ctl00_txtGlobalSearch")
+                    if "login" in page.url.lower():
+                        return {"status": "error", "message": "Cookies 已過期，請重新執行 scripts/login_save_cookies.py 手動登入。"}
 
-            # Type stock ID character by character in search bar to trigger autocomplete
-            await page.click("#ctl00_txtGlobalSearch")
-            await page.type("#ctl00_txtGlobalSearch", stock_id, delay=20)
+                    await page.wait_for_selector("#ctl00_txtGlobalSearch")
 
-            # Wait for autocomplete dropdown and find the [TW] item
-            tw_item = page.locator(f'div.AutoExtenderList:has-text("[TW]"):has-text("{stock_id}")')
-            try:
-                await tw_item.first.wait_for(state="visible", timeout=5000)
-            except PlaywrightTimeoutError:
-                pass
-            count = await tw_item.count()
+                    # Type stock ID character by character in search bar to trigger autocomplete
+                    await page.click("#ctl00_txtGlobalSearch")
+                    await page.fill("#ctl00_txtGlobalSearch", "")
+                    await page.type("#ctl00_txtGlobalSearch", stock_id, delay=20)
 
-            if count == 0:
-                return {"status": "error", "message": f"在盈再表搜尋中找不到台灣股票 {stock_id}。"}
+                    # Wait for autocomplete dropdown and find the [TW] item
+                    tw_item = page.locator(f'div.AutoExtenderList:has-text("[TW]"):has-text("{stock_id}")')
+                    try:
+                        await tw_item.first.wait_for(state="visible", timeout=5000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    count = await tw_item.count()
 
-            # Click to navigate to the Watchlist page
-            async with page.expect_navigation(wait_until="domcontentloaded", timeout=20000):
-                await tw_item.first.click()
+                    if count == 0:
+                        return {"status": "error", "message": f"在盈再表搜尋中找不到台灣股票 {stock_id}。"}
 
-            await page.wait_for_selector("#ctl00_ContentPlaceHolder1_GridView2")
+                    # Click to navigate to the Watchlist page
+                    async with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                        await tw_item.first.click()
 
-            # Find the target stock's data on the Watchlist page
-            result = await page.evaluate("""(targetId) => {
-                const rows = document.querySelectorAll('#ctl00_ContentPlaceHolder1_GridView2 tr');
+                    await page.wait_for_selector("#ctl00_ContentPlaceHolder1_GridView2")
 
-                for (const row of rows) {
-                    const cardTitle = row.querySelector('.card-title');
-                    if (!cardTitle) continue;
-                    const stockId = cardTitle.textContent.trim();
-                    if (stockId !== targetId) continue;
+                    # Find the target stock's data on the Watchlist page
+                    result = await page.evaluate("""(targetId) => {
+                        const rows = document.querySelectorAll('#ctl00_ContentPlaceHolder1_GridView2 tr');
 
-                    const get = (sel) => {
-                        const el = row.querySelector(sel);
-                        return el ? el.textContent.trim() : '';
-                    };
+                        for (const row of rows) {
+                            const cardTitle = row.querySelector('.card-title');
+                            if (!cardTitle) continue;
+                            const stockId = cardTitle.textContent.trim();
+                            if (stockId !== targetId) continue;
 
-                    return {
-                        stock_id: stockId,
-                        name: get('[id*="ViewlblIndustry"]'),
-                        exchange: get('[id*="lblExchange"]'),
-                        expected_return: get('[id*="lblIRRPortrait"]'),
-                        cheap_price: get('[id*="lblNPVLOWPortrait"]'),
-                        expensive_price: get('[id*="lblNPVHIGHPortrait"]'),
-                        nav: get('[id*="lblNAVPortrait"]'),
-                        found: true,
-                    };
-                }
+                            const get = (sel) => {
+                                const el = row.querySelector(sel);
+                                return el ? el.textContent.trim() : '';
+                            };
 
-                return {found: false};
-            }""", stock_id)
+                            return {
+                                stock_id: stockId,
+                                name: get('[id*="ViewlblIndustry"]'),
+                                exchange: get('[id*="lblExchange"]'),
+                                expected_return: get('[id*="lblIRRPortrait"]'),
+                                cheap_price: get('[id*="lblNPVLOWPortrait"]'),
+                                expensive_price: get('[id*="lblNPVHIGHPortrait"]'),
+                                nav: get('[id*="lblNAVPortrait"]'),
+                                found: true,
+                            };
+                        }
 
-            if not result.get("found"):
-                return {"status": "error", "message": f"在盈再表 Watchlist 中找不到 {stock_id} 的資料。"}
+                        return {found: false};
+                    }""", stock_id)
 
-            del result["found"]
-            return result
-        except PlaywrightTimeoutError:
-            return {"status": "error", "message": "盈再表查詢逾時，請稍後再試。"}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
+                    if not result.get("found"):
+                        return {"status": "error", "message": f"在盈再表 Watchlist 中找不到 {stock_id} 的資料。"}
+
+                    del result["found"]
+                    return result
+                except PlaywrightTimeoutError:
+                    errors.append(f"{base_url} 載入逾時")
+                except PlaywrightError as e:
+                    errors.append(f"{base_url} 連線失敗：{str(e).splitlines()[0]}")
+                except Exception as e:
+                    errors.append(f"{base_url} 失敗：{type(e).__name__}: {e}")
+
+            if errors:
+                details = "；".join(errors[:2])
+                return {"status": "error", "message": f"盈再表查詢失敗：{details}"}
+            return {"status": "error", "message": "盈再表查詢失敗：未知錯誤"}
         finally:
             await browser.close()
 

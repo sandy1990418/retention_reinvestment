@@ -28,11 +28,23 @@ from agent.agent import create_agent
 from agent.deps import StockDeps
 
 
+def _env_int(name: str, default: int, minimum: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, value)
+
+
+CRON_NOTIFY_CONCURRENCY = _env_int("CRON_NOTIFY_CONCURRENCY", 1, 1)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    agent, skills_toolset = create_agent()
-    app.state.agent = agent
-    app.state.skills_toolset = skills_toolset
+    app.state.agent = None
+    app.state.skills_toolset = None
+    app.state.agent_init_lock = asyncio.Lock()
     app.state.line_config = Configuration(access_token=config.LINE_CHANNEL_ACCESS_TOKEN)
     app.state.deps = StockDeps(
         stock_email=config.STOCK_EMAIL,
@@ -186,9 +198,22 @@ async def quick_lookup_and_reply(stock_ids: list[str], line_config, user_id: str
         pass  # LINE push failed, nothing we can do
 
 
-async def run_agent_and_reply(agent, deps: StockDeps, user_message: str, line_config, user_id: str):
+async def get_or_create_agent(app: FastAPI):
+    if app.state.agent is not None:
+        return app.state.agent
+    async with app.state.agent_init_lock:
+        if app.state.agent is None:
+            agent, skills_toolset = create_agent()
+            app.state.agent = agent
+            app.state.skills_toolset = skills_toolset
+    return app.state.agent
+
+
+async def run_agent_and_reply(app: FastAPI, user_message: str, line_config, user_id: str):
     """Run agent in background and send results via push message when done."""
     try:
+        agent = await get_or_create_agent(app)
+        deps = app.state.deps
         result = await agent.run(user_message, deps=deps)
         reply_text = format_analysis(result.output)
     except Exception as e:
@@ -196,6 +221,12 @@ async def run_agent_and_reply(agent, deps: StockDeps, user_message: str, line_co
         error_text = str(e)
         if "SkillScriptExecutionError" in error_name and "scripts/search.py" in error_text and "timed out" in error_text:
             reply_text = "盈再表查詢逾時，請稍後再試（可能是網站繁忙或 cookies 失效）。"
+        elif "OPENAI_API_KEY is not set" in error_text:
+            reply_text = "服務端尚未設定 OPENAI API Key，請通知管理者更新 Render 環境變數。"
+        elif "GOOGLE_API_KEY is not set" in error_text:
+            reply_text = "服務端尚未設定 Google API Key，請通知管理者更新 Render 環境變數。"
+        elif "ANTHROPIC_API_KEY is not set" in error_text:
+            reply_text = "服務端尚未設定 Anthropic API Key，請通知管理者更新 Render 環境變數。"
         else:
             reply_text = f"分析過程發生錯誤：{error_name}: {error_text}"
 
@@ -245,7 +276,7 @@ async def line_callback(request: Request):
             )
         else:
             task = asyncio.create_task(
-                run_agent_and_reply(app.state.agent, app.state.deps, user_message, app.state.line_config, user_id)
+                run_agent_and_reply(app, user_message, app.state.line_config, user_id)
             )
 
         app.state.background_tasks.add(task)
@@ -268,7 +299,7 @@ async def cron_notify(request: Request):
         return {"status": "ok", "message": "No users with tracked stocks"}
 
     # Limit concurrency to avoid overwhelming LLM API and Playwright
-    semaphore = asyncio.Semaphore(3)
+    semaphore = asyncio.Semaphore(CRON_NOTIFY_CONCURRENCY)
 
     async def notify_user(user_id: str, stock_ids: list[str]):
         async with semaphore:
