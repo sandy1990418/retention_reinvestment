@@ -179,8 +179,11 @@ async def quick_lookup_and_reply(stock_ids: list[str], line_config, user_id: str
     try:
         reply_text = await quick_analyze(stock_ids)
     except Exception as e:
-        reply_text = f"查詢發生錯誤：{str(e)}"
-    await send_push(line_config, user_id, reply_text)
+        reply_text = f"查詢發生錯誤：{type(e).__name__}: {e}"
+    try:
+        await send_push(line_config, user_id, reply_text)
+    except Exception:
+        pass  # LINE push failed, nothing we can do
 
 
 async def run_agent_and_reply(agent, deps: StockDeps, user_message: str, line_config, user_id: str):
@@ -189,7 +192,7 @@ async def run_agent_and_reply(agent, deps: StockDeps, user_message: str, line_co
         result = await agent.run(user_message, deps=deps)
         reply_text = format_analysis(result.output)
     except Exception as e:
-        reply_text = f"分析過程發生錯誤：{str(e)}"
+        reply_text = f"分析過程發生錯誤：{type(e).__name__}: {e}"
 
     await send_push(line_config, user_id, reply_text)
 
