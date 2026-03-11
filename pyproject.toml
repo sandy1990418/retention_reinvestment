@@ -1,0 +1,15 @@
+[project]
+name = "retention-reinvestment"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.135.1",
+    "httpx>=0.28.1",
+    "line-bot-sdk>=3.22.0",
+    "playwright>=1.58.0",
+    "pydantic-ai>=1.67.0",
+    "pydantic-ai-skills>=0.5.1",
+    "python-dotenv>=1.2.2",
+    "uvicorn>=0.41.0",
+]

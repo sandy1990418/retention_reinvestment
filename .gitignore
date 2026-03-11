@@ -1,0 +1,6 @@
+.env
+storage_state.json
+.venv
+.env.example
+uv.lock
+__pycache__/
