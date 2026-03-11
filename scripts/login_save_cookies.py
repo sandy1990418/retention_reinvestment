@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""手動登入盈再表並儲存 cookies。
-自動填入帳密，你只需要完成 reCAPTCHA 驗證並點登入。
+"""Manually log into the Retention & Reinvestment Table and save cookies.
+Auto-fills credentials; you only need to complete the reCAPTCHA and click login.
 """
 
 import asyncio
@@ -20,7 +20,7 @@ async def login_and_save():
     password = os.environ.get("STOCKEMAILPASSWORD", "")
 
     async with async_playwright() as p:
-        # 用普通瀏覽器模式（避免被偵測為自動化）
+        # Use regular browser mode (avoid automation detection)
         browser = await p.chromium.launch(
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],
@@ -30,12 +30,12 @@ async def login_and_save():
         )
         page = await context.new_page()
 
-        # 移除 webdriver 標記
+        # Remove webdriver flag
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         await page.goto("https://stocks.ddns.net/App/Watchlist.aspx", wait_until="domcontentloaded", timeout=60000)
 
-        # 自動填入帳密
+        # Auto-fill credentials
         if email and password:
             await page.fill('input[id$="txtUsername"]', email)
             await page.fill('input[id$="txtPassword"]', password)
@@ -48,9 +48,9 @@ async def login_and_save():
         print("登入成功後會自動儲存 cookies")
         print("=" * 50)
 
-        # 等待導航到 Watchlist 頁面（最多等 3 分鐘）
+        # Wait for navigation to Watchlist page (up to 3 minutes)
         try:
-            # 等到 URL 包含 Watchlist 且有 table
+            # Wait until URL contains Watchlist and table is present
             await page.wait_for_function(
                 """() => {
                     return window.location.href.includes('Watchlist')
@@ -58,7 +58,7 @@ async def login_and_save():
                 }""",
                 timeout=180000,
             )
-            # 多等一下確保頁面完全載入
+            # Wait a bit more to ensure page is fully loaded
             await page.wait_for_timeout(2000)
 
             await context.storage_state(path=str(STORAGE_STATE_PATH))
@@ -67,7 +67,7 @@ async def login_and_save():
         except Exception as e:
             print(f"\n⚠️ 等待逾時或錯誤: {e}")
             print(f"目前 URL: {page.url}")
-            # 還是嘗試儲存
+            # Still attempt to save
             await context.storage_state(path=str(STORAGE_STATE_PATH))
             print(f"已嘗試儲存 cookies 到: {STORAGE_STATE_PATH}")
 

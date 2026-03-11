@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""在盈再表搜尋特定股票的貴價與淑價。
+"""Search for a specific stock's expensive/cheap prices on the Retention & Reinvestment Table.
 
-利用 Screener 頁面的全域搜尋自動完成功能：
-1. 在搜尋欄輸入股票代號，觸發 autocomplete
-2. 點擊 [TW] 的結果項目，導航到 Watchlist 頁面
-3. 從 Watchlist 頁面抓取該股票的貴價、淑價等資料
+Uses the Screener page's global search autocomplete:
+1. Type stock ID in the search bar to trigger autocomplete
+2. Click the [TW] result item to navigate to the Watchlist page
+3. Extract the stock's expensive price, cheap price, and other data from the Watchlist page
 """
 
 import json
@@ -44,11 +44,11 @@ async def search(stock_id: str):
 
             await page.wait_for_selector("#ctl00_txtGlobalSearch", timeout=10000)
 
-            # 在搜尋欄逐字輸入股票代號，觸發 autocomplete
+            # Type stock ID character by character in search bar to trigger autocomplete
             await page.click("#ctl00_txtGlobalSearch")
             await page.type("#ctl00_txtGlobalSearch", stock_id, delay=80)
 
-            # 等待 autocomplete 下拉選單出現，找 [TW] 項目
+            # Wait for autocomplete dropdown and find the [TW] item
             tw_item = page.locator(f'div.AutoExtenderList:has-text("[TW]"):has-text("{stock_id}")')
             try:
                 await tw_item.first.wait_for(state="visible", timeout=5000)
@@ -63,13 +63,13 @@ async def search(stock_id: str):
                 }, ensure_ascii=False))
                 sys.exit(1)
 
-            # 點擊後會導航到 Watchlist 頁面
+            # Click to navigate to the Watchlist page
             async with page.expect_navigation(wait_until="domcontentloaded", timeout=30000):
                 await tw_item.first.click()
 
             await page.wait_for_selector("#ctl00_ContentPlaceHolder1_GridView2", timeout=15000)
 
-            # 在 Watchlist 頁面找到目標股票的資料
+            # Find the target stock's data on the Watchlist page
             result = await page.evaluate("""(targetId) => {
                 const rows = document.querySelectorAll('#ctl00_ContentPlaceHolder1_GridView2 tr');
 

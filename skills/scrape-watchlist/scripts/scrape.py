@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""用已儲存的 cookies 登入盈再表，爬取 Watchlist 所有股票的貴價與淑價。"""
+"""Log into Retention & Reinvestment Table using saved cookies and scrape all stocks' expensive/cheap prices from the Watchlist."""
 
 import json
 import sys
@@ -38,7 +38,7 @@ async def scrape():
 
             await page.wait_for_selector("#ctl00_ContentPlaceHolder1_GridView2", timeout=15000)
 
-            # 用 JS 一次抓取所有股票資料（去重複）
+            # Fetch all stock data in one JS call (deduplicated)
             stocks = await page.evaluate("""() => {
                 const mainTable = document.getElementById('ctl00_ContentPlaceHolder1_GridView2');
                 if (!mainTable) return [];
@@ -60,11 +60,11 @@ async def scrape():
                     if (!stockId || seen.has(stockId)) continue;
                     seen.add(stockId);
 
-                    // 公司名稱
+                    // Company name
                     const nameEl = row.querySelector('[id*="lblStockName"], [id*="lblCompany"], .card-text');
                     let stockName = nameEl ? nameEl.textContent.trim() : '';
 
-                    // ViewtblExp: 預期報酬% | 淑價 | 貴價 | NAV
+                    // ViewtblExp: Expected Return% | Cheap Price | Expensive Price | NAV
                     const expTable = row.querySelector('[id*="ViewtblExpPortrait"]') || row.querySelector('[id*="ViewtblExp"]');
                     let expectedReturn = '', cheapPrice = '', expensivePrice = '', nav = '';
                     if (expTable) {

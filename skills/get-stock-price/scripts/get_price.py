@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""查詢台灣股票即時價格（支援一次查多支）。"""
+"""Query real-time Taiwan stock prices (supports multiple stocks at once)."""
 
 import json
 import sys
@@ -9,14 +9,14 @@ import urllib.request
 
 def get_price(stock_ids: list[str]) -> list[dict]:
     """從 TWSE 查詢股票即時價格。"""
-    # 組合查詢字串（同時查上市 tse 和上櫃 otc）
+    # Build query string (check both TSE listed and OTC stocks)
     ex_ch = "|".join(
         [f"tse_{sid}.tw" for sid in stock_ids] +
         [f"otc_{sid}.tw" for sid in stock_ids]
     )
     url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0"
 
-    # 處理 SSL 憑證問題
+    # Handle SSL certificate issues
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE

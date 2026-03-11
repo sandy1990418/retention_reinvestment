@@ -35,12 +35,12 @@ parser = WebhookParser(config.LINE_CHANNEL_SECRET)
 
 
 async def run_agent_and_reply(agent, deps: StockDeps, user_message: str, line_config, user_id: str):
-    """背景執行 agent，完成後用 push message 回傳結果"""
+    """Run agent in background and send results via push message when done."""
     try:
         result = await agent.run(user_message, deps=deps)
         output = result.output
 
-        # 格式化回覆
+        # Format reply
         lines = [output.summary, ""]
         for rec in output.recommendations:
             price_info = f"現價:{rec.current_price}" if rec.current_price else ""
@@ -58,7 +58,7 @@ async def run_agent_and_reply(agent, deps: StockDeps, user_message: str, line_co
     except Exception as e:
         reply_text = f"分析過程發生錯誤：{str(e)}"
 
-    # 用 push message 傳送（不受 reply token 30 秒限制）
+    # Send via push message (not limited by reply token's 30-second expiry)
     async with AsyncApiClient(line_config) as api_client:
         line_api = AsyncMessagingApi(api_client)
         if len(reply_text) > 4500:
@@ -90,7 +90,7 @@ async def line_callback(request: Request):
         user_message = event.message.text
         user_id = event.source.user_id
 
-        # 先用 reply token 快速回覆「處理中」
+        # Quickly reply "processing" using the reply token
         async with AsyncApiClient(app.state.line_config) as api_client:
             line_api = AsyncMessagingApi(api_client)
             await line_api.reply_message(
@@ -100,7 +100,7 @@ async def line_callback(request: Request):
                 )
             )
 
-        # 背景執行 agent
+        # Run agent in background
         deps = StockDeps(
             stock_email=config.STOCK_EMAIL,
             stock_password=config.STOCK_PASSWORD,
