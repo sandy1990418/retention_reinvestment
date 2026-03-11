@@ -17,14 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from utils.storage import get_storage_state_path
 
 
-async def search(stock_id: str):
+async def search(stock_id: str) -> dict:
+    """Search a stock and return result dict. Raises on fatal errors."""
     state_path = get_storage_state_path()
     if not state_path:
-        print(json.dumps({
-            "status": "error",
-            "message": "找不到 storage_state.json，請先執行 scripts/login_save_cookies.py 手動登入。"
-        }, ensure_ascii=False))
-        sys.exit(1)
+        return {"status": "error", "message": "找不到 storage_state.json，請先執行 scripts/login_save_cookies.py 手動登入。"}
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -41,11 +38,7 @@ async def search(stock_id: str):
             await page.goto("https://stocks.ddns.net/Screener.aspx", wait_until="domcontentloaded", timeout=60000)
 
             if "login" in page.url.lower():
-                print(json.dumps({
-                    "status": "error",
-                    "message": "Cookies 已過期，請重新執行 scripts/login_save_cookies.py 手動登入。"
-                }, ensure_ascii=False))
-                sys.exit(1)
+                return {"status": "error", "message": "Cookies 已過期，請重新執行 scripts/login_save_cookies.py 手動登入。"}
 
             await page.wait_for_selector("#ctl00_txtGlobalSearch", timeout=10000)
 
@@ -62,11 +55,7 @@ async def search(stock_id: str):
             count = await tw_item.count()
 
             if count == 0:
-                print(json.dumps({
-                    "status": "error",
-                    "message": f"在盈再表搜尋中找不到台灣股票 {stock_id}。"
-                }, ensure_ascii=False))
-                sys.exit(1)
+                return {"status": "error", "message": f"在盈再表搜尋中找不到台灣股票 {stock_id}。"}
 
             # Click to navigate to the Watchlist page
             async with page.expect_navigation(wait_until="domcontentloaded", timeout=30000):
@@ -105,18 +94,13 @@ async def search(stock_id: str):
             }""", stock_id)
 
             if not result.get("found"):
-                print(json.dumps({
-                    "status": "error",
-                    "message": f"在盈再表 Watchlist 中找不到 {stock_id} 的資料。"
-                }, ensure_ascii=False))
-                sys.exit(1)
+                return {"status": "error", "message": f"在盈再表 Watchlist 中找不到 {stock_id} 的資料。"}
 
             del result["found"]
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return result
 
         except Exception as e:
-            print(json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False))
-            sys.exit(1)
+            return {"status": "error", "message": str(e)}
         finally:
             await browser.close()
 
@@ -126,7 +110,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stock-id", required=True, help="股票代號，例如 2317")
     args = parser.parse_args()
-    asyncio.run(search(args.stock_id))
+    result = asyncio.run(search(args.stock_id))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if isinstance(result, dict) and result.get("status") == "error":
+        sys.exit(1)
 
 
 if __name__ == "__main__":

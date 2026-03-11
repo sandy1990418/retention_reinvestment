@@ -1,82 +1,46 @@
 """Direct stock lookup — bypasses LLM agent for simple queries.
 
 Runs search-stock and get-stock-price in parallel, then compares
-prices programmatically. ~20-30 seconds instead of ~180 seconds.
+prices programmatically. Much faster than going through the agent.
 """
 
 import asyncio
-import json
-import logging
-import shutil
-import sys
+import importlib.util
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
 
 
-async def _run_script(cmd: list[str], timeout: int = 90) -> dict | list | None:
-    """Run a skill script as subprocess and parse JSON output."""
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        return {"status": "error", "message": "查詢逾時（超過 90 秒）"}
+def _import_module(name: str, path: str):
+    """Import a module from a file path (works with hyphenated directories)."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
-    output = stdout.decode().strip()
-    err_output = stderr.decode().strip()
 
-    if proc.returncode != 0:
-        logger.error(f"Script failed (exit {proc.returncode}): cmd={cmd}, stderr={err_output[-500:]}")
-        # Try to parse JSON error from stdout first
-        if output:
-            try:
-                return json.loads(output)
-            except json.JSONDecodeError:
-                pass
-        # Fall back to stderr
-        msg = err_output.split("\n")[-1] if err_output else f"腳本執行失敗 (exit code {proc.returncode})"
-        return {"status": "error", "message": msg}
-
-    if not output:
-        return {"status": "error", "message": "腳本無輸出"}
-
-    try:
-        return json.loads(output)
-    except json.JSONDecodeError:
-        return {"status": "error", "message": f"無法解析輸出: {output[:200]}"}
+# Import skill modules directly (no subprocess needed)
+_search_mod = _import_module(
+    "search", str(SKILLS_DIR / "search-stock" / "scripts" / "search.py")
+)
+_price_mod = _import_module(
+    "get_price", str(SKILLS_DIR / "get-stock-price" / "scripts" / "get_price.py")
+)
 
 
 async def quick_analyze(stock_ids: list[str]) -> str:
     """Analyze stocks directly without LLM. Returns formatted text."""
-    search_script = str(SKILLS_DIR / "search-stock" / "scripts" / "search.py")
-    price_script = str(SKILLS_DIR / "get-stock-price" / "scripts" / "get_price.py")
 
-    # Use sys.executable (the running Python) for subprocesses
-    python = sys.executable
-    logger.info(f"quick_analyze: python={python}, stock_ids={stock_ids}")
+    # Run all search + price lookups in parallel
+    search_tasks = [_search_mod.search(sid) for sid in stock_ids]
 
-    # Run all lookups in parallel
-    search_tasks = [
-        _run_script([python, search_script, "--stock-id", sid])
-        for sid in stock_ids
-    ]
-    price_args = [python, price_script]
-    for sid in stock_ids:
-        price_args.extend(["--stock-id", sid])
-    price_task = _run_script(price_args)
+    # get_price is sync, run in thread pool
+    loop = asyncio.get_event_loop()
+    price_task = loop.run_in_executor(None, _price_mod.get_price, stock_ids)
 
-    # Wait for all results concurrently
-    results = await asyncio.gather(*search_tasks, price_task)
-
-    search_results = results[:-1]
-    price_data = results[-1]
+    # Wait for everything concurrently
+    search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+    price_data = await price_task
 
     # Build price lookup
     prices = {}
@@ -86,16 +50,21 @@ async def quick_analyze(stock_ids: list[str]) -> str:
 
     # Format output
     lines = []
-    for sid, search in zip(stock_ids, search_results):
-        if not search or (isinstance(search, dict) and search.get("status") == "error"):
-            err_msg = search.get("message", "查詢失敗") if search else "未知錯誤"
-            lines.append(f"❌ {sid}: {err_msg}")
+    for sid, search_result in zip(stock_ids, search_results):
+        # Handle exceptions from search
+        if isinstance(search_result, Exception):
+            lines.append(f"❌ {sid}: {str(search_result)}")
             lines.append("")
             continue
 
-        name = search.get("name", "")
-        cheap = _parse_float(search.get("cheap_price", ""))
-        expensive = _parse_float(search.get("expensive_price", ""))
+        if isinstance(search_result, dict) and search_result.get("status") == "error":
+            lines.append(f"❌ {sid}: {search_result.get('message', '查詢失敗')}")
+            lines.append("")
+            continue
+
+        name = search_result.get("name", "")
+        cheap = _parse_float(search_result.get("cheap_price", ""))
+        expensive = _parse_float(search_result.get("expensive_price", ""))
 
         price_info = prices.get(sid, {})
         current = _parse_float(price_info.get("price", ""))

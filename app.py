@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import os
 import re
 import secrets
 from contextlib import asynccontextmanager
+
+logger = logging.getLogger(__name__)
 
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
