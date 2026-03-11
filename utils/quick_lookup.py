@@ -88,11 +88,14 @@ async def _run_search(stock_id: str, semaphore: asyncio.Semaphore) -> dict:
     if cached is not None:
         return cached
 
+    script_timeout = int(getattr(_search_mod, "SCRIPT_TIMEOUT_SECONDS", 60))
+    effective_timeout = max(SEARCH_TIMEOUT_SECONDS, script_timeout + 5)
+
     async with semaphore:
         try:
-            result = await asyncio.wait_for(_search_mod.search(stock_id), timeout=SEARCH_TIMEOUT_SECONDS)
+            result = await asyncio.wait_for(_search_mod.search(stock_id), timeout=effective_timeout)
         except asyncio.TimeoutError:
-            return {"status": "error", "message": f"盈再表查詢逾時（{SEARCH_TIMEOUT_SECONDS} 秒）"}
+            return {"status": "error", "message": f"盈再表查詢逾時（{effective_timeout} 秒）"}
         except Exception as e:
             return {"status": "error", "message": f"{type(e).__name__}: {e}"}
 
