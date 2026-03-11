@@ -192,7 +192,12 @@ async def run_agent_and_reply(agent, deps: StockDeps, user_message: str, line_co
         result = await agent.run(user_message, deps=deps)
         reply_text = format_analysis(result.output)
     except Exception as e:
-        reply_text = f"分析過程發生錯誤：{type(e).__name__}: {e}"
+        error_name = type(e).__name__
+        error_text = str(e)
+        if "SkillScriptExecutionError" in error_name and "scripts/search.py" in error_text and "timed out" in error_text:
+            reply_text = "盈再表查詢逾時，請稍後再試（可能是網站繁忙或 cookies 失效）。"
+        else:
+            reply_text = f"分析過程發生錯誤：{error_name}: {error_text}"
 
     await send_push(line_config, user_id, reply_text)
 
@@ -232,13 +237,17 @@ async def line_callback(request: Request):
                 )
             )
 
-        # For stock IDs, build a direct prompt for the agent
+        # Stock ID queries go through direct lookup to avoid agent/script timeout chain.
         if command == "quick":
-            user_message = f"分析以下股票：{arg}"
+            stock_ids = arg.split()
+            task = asyncio.create_task(
+                quick_lookup_and_reply(stock_ids, app.state.line_config, user_id)
+            )
+        else:
+            task = asyncio.create_task(
+                run_agent_and_reply(app.state.agent, app.state.deps, user_message, app.state.line_config, user_id)
+            )
 
-        task = asyncio.create_task(
-            run_agent_and_reply(app.state.agent, app.state.deps, user_message, app.state.line_config, user_id)
-        )
         app.state.background_tasks.add(task)
         task.add_done_callback(app.state.background_tasks.discard)
 

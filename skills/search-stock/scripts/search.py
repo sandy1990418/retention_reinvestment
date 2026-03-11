@@ -11,36 +11,47 @@ import json
 import sys
 import asyncio
 from pathlib import Path
-from playwright.async_api import async_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from utils.storage import get_storage_state_path
 
+SCRIPT_TIMEOUT_SECONDS = 70
+NAVIGATION_TIMEOUT_MS = 25000
+SELECTOR_TIMEOUT_MS = 8000
 
-async def search(stock_id: str) -> dict:
-    """Search a stock and return result dict. Raises on fatal errors."""
-    state_path = get_storage_state_path()
-    if not state_path:
-        return {"status": "error", "message": "找不到 storage_state.json，請先執行 scripts/login_save_cookies.py 手動登入。"}
 
+async def _search_impl(stock_id: str, state_path: str) -> dict:
+    """Actual Playwright flow."""
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--no-zygote",
+            ],
         )
         context = await browser.new_context(
             storage_state=state_path,
-            viewport={"width": 1920, "height": 1080},
+            viewport={"width": 1280, "height": 720},
         )
         page = await context.new_page()
+        page.set_default_timeout(SELECTOR_TIMEOUT_MS)
 
         try:
-            await page.goto("https://stocks.ddns.net/Screener.aspx", wait_until="domcontentloaded", timeout=60000)
+            await page.goto(
+                "https://stocks.ddns.net/Screener.aspx",
+                wait_until="domcontentloaded",
+                timeout=NAVIGATION_TIMEOUT_MS,
+            )
 
             if "login" in page.url.lower():
                 return {"status": "error", "message": "Cookies 已過期，請重新執行 scripts/login_save_cookies.py 手動登入。"}
 
-            await page.wait_for_selector("#ctl00_txtGlobalSearch", timeout=10000)
+            await page.wait_for_selector("#ctl00_txtGlobalSearch")
 
             # Type stock ID character by character in search bar to trigger autocomplete
             await page.click("#ctl00_txtGlobalSearch")
@@ -50,7 +61,7 @@ async def search(stock_id: str) -> dict:
             tw_item = page.locator(f'div.AutoExtenderList:has-text("[TW]"):has-text("{stock_id}")')
             try:
                 await tw_item.first.wait_for(state="visible", timeout=5000)
-            except Exception:
+            except PlaywrightTimeoutError:
                 pass
             count = await tw_item.count()
 
@@ -58,10 +69,10 @@ async def search(stock_id: str) -> dict:
                 return {"status": "error", "message": f"在盈再表搜尋中找不到台灣股票 {stock_id}。"}
 
             # Click to navigate to the Watchlist page
-            async with page.expect_navigation(wait_until="domcontentloaded", timeout=30000):
+            async with page.expect_navigation(wait_until="domcontentloaded", timeout=20000):
                 await tw_item.first.click()
 
-            await page.wait_for_selector("#ctl00_ContentPlaceHolder1_GridView2", timeout=15000)
+            await page.wait_for_selector("#ctl00_ContentPlaceHolder1_GridView2")
 
             # Find the target stock's data on the Watchlist page
             result = await page.evaluate("""(targetId) => {
@@ -98,11 +109,26 @@ async def search(stock_id: str) -> dict:
 
             del result["found"]
             return result
-
+        except PlaywrightTimeoutError:
+            return {"status": "error", "message": "盈再表查詢逾時，請稍後再試。"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
         finally:
             await browser.close()
+
+
+async def search(stock_id: str) -> dict:
+    """Search a stock and return result dict. Raises on fatal errors."""
+    state_path = get_storage_state_path()
+    if not state_path:
+        return {"status": "error", "message": "找不到 storage_state.json，請先執行 scripts/login_save_cookies.py 手動登入。"}
+    try:
+        return await asyncio.wait_for(_search_impl(stock_id, state_path), timeout=SCRIPT_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return {
+            "status": "error",
+            "message": f"盈再表查詢逾時（{SCRIPT_TIMEOUT_SECONDS} 秒），請稍後再試。",
+        }
 
 
 def main():
