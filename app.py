@@ -232,17 +232,13 @@ async def line_callback(request: Request):
                 )
             )
 
-        # Quick lookup for simple stock IDs (bypasses LLM, ~20-30s)
+        # For stock IDs, build a direct prompt for the agent
         if command == "quick":
-            stock_ids = arg.split()
-            task = asyncio.create_task(
-                quick_lookup_and_reply(stock_ids, app.state.line_config, user_id)
-            )
-        else:
-            # Complex query: use full agent (slower but handles natural language)
-            task = asyncio.create_task(
-                run_agent_and_reply(app.state.agent, app.state.deps, user_message, app.state.line_config, user_id)
-            )
+            user_message = f"分析以下股票：{arg}"
+
+        task = asyncio.create_task(
+            run_agent_and_reply(app.state.agent, app.state.deps, user_message, app.state.line_config, user_id)
+        )
         app.state.background_tasks.add(task)
         task.add_done_callback(app.state.background_tasks.discard)
 
