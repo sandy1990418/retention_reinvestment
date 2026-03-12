@@ -13,6 +13,7 @@ Usage:
 import asyncio
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -91,6 +92,43 @@ async def main():
     # Upsert successful results to Supabase
     upsert_stocks(results)
     logger.info("Done. %d/%d stocks updated in cache.", len(success), len(stock_ids))
+
+    # Check for cookies expiration and notify via LINE
+    cookies_expired = any("Cookies 已過期" in e or "所有網址均無法連線" in e for e in errors)
+    if cookies_expired:
+        logger.warning("Cookies may be expired! Sending LINE notification.")
+        _notify_cookies_expired()
+
+
+def _notify_cookies_expired():
+    """Send LINE push notification when cookies expire."""
+    token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
+    if not token:
+        logger.warning("No LINE_CHANNEL_ACCESS_TOKEN, cannot send notification.")
+        return
+
+    # Notify all users who have tracked stocks
+    users = get_all_users_with_stocks()
+    if not users:
+        return
+
+    import httpx
+    msg = (
+        "⚠️ 盈再表 cookies 已過期，stock cache 無法更新。\n"
+        "請在本地執行：\n"
+        "1. uv run python scripts/login_save_cookies.py\n"
+        "2. uv run python scripts/refresh_secret.py"
+    )
+    for user_id in users:
+        try:
+            httpx.post(
+                "https://api.line.me/v2/bot/message/push",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"to": user_id, "messages": [{"type": "text", "text": msg}]},
+            )
+            logger.info("Notified user %s about cookie expiry", user_id)
+        except Exception as e:
+            logger.error("Failed to notify user %s: %s", user_id, e)
 
 
 if __name__ == "__main__":
