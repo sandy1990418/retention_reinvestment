@@ -191,8 +191,27 @@ async def _search_impl(stock_id: str, state_path: str) -> dict:
     return results[0]
 
 
+def _try_supabase_cache(stock_ids: list[str]) -> dict[str, dict]:
+    """Try to get data from Supabase cache. Returns {stock_id: data} for hits."""
+    try:
+        from utils.stock_cache import get_cached_stocks
+        cached = get_cached_stocks(stock_ids)
+        # Only return entries that have actual price data
+        return {
+            sid: data for sid, data in cached.items()
+            if data.get("cheap_price") or data.get("expensive_price")
+        }
+    except Exception:
+        return {}
+
+
 async def search(stock_id: str) -> dict:
-    """Search a stock and return result dict."""
+    """Search a stock: Supabase cache first, then Playwright fallback."""
+    # Try cache first
+    cached = _try_supabase_cache([stock_id])
+    if stock_id in cached:
+        return cached[stock_id]
+
     state_path = get_storage_state_path()
     if not state_path:
         return {"status": "error", "message": "找不到 storage_state.json，請先執行 scripts/login_save_cookies.py 手動登入。"}
@@ -206,16 +225,33 @@ async def search(stock_id: str) -> dict:
 
 
 async def search_batch(stock_ids: list[str]) -> list[dict]:
-    """Search multiple stocks in one browser session."""
+    """Search multiple stocks: Supabase cache first, Playwright for misses."""
+    # Try cache first
+    cached = _try_supabase_cache(stock_ids)
+    uncached = [sid for sid in stock_ids if sid not in cached]
+
+    if not uncached:
+        return [cached[sid] for sid in stock_ids]
+
+    # Playwright fallback for uncached stocks
     state_path = get_storage_state_path()
     if not state_path:
         error = {"status": "error", "message": "找不到 storage_state.json，請先執行 scripts/login_save_cookies.py 手動登入。"}
-        return [error] * len(stock_ids)
-    timeout = BATCH_TIMEOUT_SECONDS
-    try:
-        return await asyncio.wait_for(_search_batch_impl(stock_ids, state_path), timeout=timeout)
-    except asyncio.TimeoutError:
-        return [{"status": "error", "message": f"盈再表批次查詢逾時（{timeout} 秒），請稍後再試。"}] * len(stock_ids)
+        scraped = {sid: error for sid in uncached}
+    else:
+        timeout = BATCH_TIMEOUT_SECONDS
+        try:
+            results = await asyncio.wait_for(_search_batch_impl(uncached, state_path), timeout=timeout)
+            scraped = dict(zip(uncached, results))
+        except asyncio.TimeoutError:
+            error = {"status": "error", "message": f"盈再表批次查詢逾時（{timeout} 秒），請稍後再試。"}
+            scraped = {sid: error for sid in uncached}
+
+    # Merge: cache hits + scraped results, in original order
+    merged = {}
+    merged.update(cached)
+    merged.update(scraped)
+    return [merged.get(sid, {"status": "error", "message": "查詢失敗"}) for sid in stock_ids]
 
 
 def main():
