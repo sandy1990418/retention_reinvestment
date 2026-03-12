@@ -1,19 +1,20 @@
 """Direct stock lookup — bypasses LLM agent for simple queries.
 
-Runs search-stock (batch subprocess) and get-stock-price in parallel,
-then compares prices programmatically. Much faster than going through the agent.
+Reads cached cheap/expensive prices from Supabase (populated by GitHub Actions),
+fetches real-time prices from TWSE API, then compares programmatically.
+No Playwright needed on the server side.
 """
 
 import asyncio
 import importlib.util
-import json
+import logging
 import os
-import sys
 import time
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
-SEARCH_SCRIPT = str(SKILLS_DIR / "search-stock" / "scripts" / "search.py")
 
 
 def _env_int(name: str, default: int, minimum: int) -> int:
@@ -25,19 +26,14 @@ def _env_int(name: str, default: int, minimum: int) -> int:
     return max(minimum, value)
 
 
-SEARCH_CACHE_TTL_SECONDS = _env_int("SEARCH_CACHE_TTL_SECONDS", 21600, 60)
-SEARCH_TIMEOUT_SECONDS = _env_int("QUICK_SEARCH_TIMEOUT_SECONDS", 120, 30)
 MAX_STOCK_IDS_PER_REQUEST = _env_int("QUICK_MAX_STOCK_IDS", 6, 1)
+MEMORY_CACHE_TTL = _env_int("QUICK_MEMORY_CACHE_TTL", 600, 60)  # 10 min
 
-# Global semaphore — shared across ALL requests to prevent concurrent Chromium launches
-_search_semaphore = asyncio.Semaphore(1)
-
-# In-memory cache: {stock_id: (expires_at_epoch, search_result_dict)}
-_search_cache: dict[str, tuple[float, dict]] = {}
+# In-memory L1 cache: {stock_id: (expires_at, data_dict)}
+_mem_cache: dict[str, tuple[float, dict]] = {}
 
 
 def _import_module(name: str, path: str):
-    """Import a module from a file path (works with hyphenated directories)."""
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -51,7 +47,6 @@ _price_mod = _import_module(
 
 
 def _normalize_stock_ids(stock_ids: list[str]) -> list[str]:
-    """Dedupe and cap stock IDs to protect free-tier resources."""
     normalized: list[str] = []
     seen: set[str] = set()
     for sid in stock_ids:
@@ -65,93 +60,44 @@ def _normalize_stock_ids(stock_ids: list[str]) -> list[str]:
     return normalized
 
 
-def _get_cached_search(stock_id: str) -> dict | None:
-    cached = _search_cache.get(stock_id)
-    if not cached:
-        return None
-    expires_at, data = cached
-    if time.time() >= expires_at:
-        _search_cache.pop(stock_id, None)
-        return None
-    return dict(data)
-
-
-def _set_cached_search(stock_id: str, result: dict):
-    if result.get("status") == "error":
-        return
-    if not result.get("cheap_price") and not result.get("expensive_price"):
-        return
-    _search_cache[stock_id] = (time.time() + SEARCH_CACHE_TTL_SECONDS, dict(result))
-
-
-async def _run_batch_search(stock_ids: list[str]) -> list[dict]:
-    """Run search for all stocks in ONE subprocess (one browser session)."""
-    # Check cache first, only search uncached ones
-    results: dict[str, dict] = {}
-    uncached: list[str] = []
+def _get_from_mem_cache(stock_ids: list[str]) -> tuple[dict[str, dict], list[str]]:
+    """Check memory cache. Returns (cached_results, uncached_ids)."""
+    now = time.time()
+    cached = {}
+    uncached = []
     for sid in stock_ids:
-        cached = _get_cached_search(sid)
-        if cached is not None:
-            results[sid] = cached
+        entry = _mem_cache.get(sid)
+        if entry and entry[0] > now:
+            cached[sid] = entry[1]
         else:
             uncached.append(sid)
+    return cached, uncached
 
-    if not uncached:
-        return [results[sid] for sid in stock_ids]
 
-    # Build command: search.py --stock-id 2330 --stock-id 2317
-    cmd = [sys.executable, SEARCH_SCRIPT]
-    for sid in uncached:
-        cmd.extend(["--stock-id", sid])
+def _update_mem_cache(results: dict[str, dict]):
+    expires = time.time() + MEMORY_CACHE_TTL
+    for sid, data in results.items():
+        if data.get("status") != "error":
+            _mem_cache[sid] = (expires, data)
 
-    async with _search_semaphore:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=SEARCH_TIMEOUT_SECONDS
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            error = {"status": "error", "message": f"盈再表查詢逾時（{SEARCH_TIMEOUT_SECONDS} 秒）"}
-            for sid in uncached:
-                results[sid] = error
-            return [results[sid] for sid in stock_ids]
-        except Exception as e:
-            error = {"status": "error", "message": f"{type(e).__name__}: {e}"}
-            for sid in uncached:
-                results[sid] = error
-            return [results[sid] for sid in stock_ids]
 
-    # Parse output
-    if stdout:
-        try:
-            parsed = json.loads(stdout.decode())
-            if isinstance(parsed, dict):
-                # Single stock mode returns a dict
-                parsed = [parsed]
-            if isinstance(parsed, list) and len(parsed) == len(uncached):
-                for sid, result in zip(uncached, parsed):
-                    if isinstance(result, dict):
-                        _set_cached_search(sid, result)
-                        results[sid] = result
-                    else:
-                        results[sid] = {"status": "error", "message": "盈再表回傳格式異常"}
-            else:
-                for sid in uncached:
-                    results.setdefault(sid, {"status": "error", "message": "盈再表回傳格式異常"})
-        except json.JSONDecodeError:
-            for sid in uncached:
-                results[sid] = {"status": "error", "message": "盈再表回傳格式異常"}
-    else:
-        for sid in uncached:
-            results[sid] = {"status": "error", "message": "盈再表查詢無回應"}
+def _fetch_from_supabase(stock_ids: list[str]) -> dict[str, dict]:
+    """Fetch cached stock data from Supabase stock_cache table."""
+    from utils.stock_cache import get_cached_stocks
+    return get_cached_stocks(stock_ids)
 
-    return [results.get(sid, {"status": "error", "message": "查詢失敗"}) for sid in stock_ids]
+
+async def _get_search_results(stock_ids: list[str]) -> dict[str, dict]:
+    """Get search results from memory cache → Supabase cache."""
+    cached, uncached = _get_from_mem_cache(stock_ids)
+
+    if uncached:
+        loop = asyncio.get_running_loop()
+        db_results = await loop.run_in_executor(None, _fetch_from_supabase, uncached)
+        _update_mem_cache(db_results)
+        cached.update(db_results)
+
+    return cached
 
 
 async def quick_analyze(stock_ids: list[str]) -> str:
@@ -160,13 +106,13 @@ async def quick_analyze(stock_ids: list[str]) -> str:
     if not normalized_stock_ids:
         return "請輸入有效股票代號（例如 2330）"
 
-    # Run batch search and price lookup in parallel
-    search_task = _run_batch_search(normalized_stock_ids)
+    # Run Supabase cache read and TWSE price lookup in parallel
+    search_task = _get_search_results(normalized_stock_ids)
 
     loop = asyncio.get_running_loop()
     price_task = loop.run_in_executor(None, _price_mod.get_price, normalized_stock_ids)
 
-    search_results = await search_task
+    search_data = await search_task
     try:
         price_data = await price_task
     except Exception:
@@ -178,6 +124,15 @@ async def quick_analyze(stock_ids: list[str]) -> str:
         for p in price_data:
             prices[p["stock_id"]] = p
 
+    # Check if any stock has cached cheap/expensive prices
+    has_cache = any(
+        search_data.get(sid) and (search_data[sid].get("cheap_price") or search_data[sid].get("expensive_price"))
+        for sid in normalized_stock_ids
+    )
+    if not has_cache:
+        logger.info("quick_analyze: no cache data for %s, fallback to agent", normalized_stock_ids)
+        return None
+
     # Format output
     lines = []
     if len(normalized_stock_ids) < len(stock_ids):
@@ -186,15 +141,18 @@ async def quick_analyze(stock_ids: list[str]) -> str:
         )
         lines.append("")
 
-    for sid, search_result in zip(normalized_stock_ids, search_results):
-        if isinstance(search_result, dict) and search_result.get("status") == "error":
+    for sid in normalized_stock_ids:
+        search_result = search_data.get(sid)
+        if search_result is None:
+            search_error = "此股票尚未收錄，請先追蹤後等待下次更新。"
+        elif search_result.get("status") == "error":
             search_error = search_result.get("message", "查詢失敗")
         else:
             search_error = ""
 
-        name = search_result.get("name", "") if isinstance(search_result, dict) else ""
-        cheap = _parse_float(search_result.get("cheap_price", "")) if isinstance(search_result, dict) else None
-        expensive = _parse_float(search_result.get("expensive_price", "")) if isinstance(search_result, dict) else None
+        name = search_result.get("name", "") if search_result else ""
+        cheap = _parse_float(search_result.get("cheap_price", "")) if search_result else None
+        expensive = _parse_float(search_result.get("expensive_price", "")) if search_result else None
 
         price_info = prices.get(sid, {})
         current = _parse_float(price_info.get("price", ""))
@@ -205,7 +163,7 @@ async def quick_analyze(stock_ids: list[str]) -> str:
                 lines.append(f"⚠️ {sid} {stock_name or sid}")
                 lines.append(f"  現價:{current}")
                 lines.append("  建議：無法判斷")
-                lines.append(f"  無法取得盈再表貴價/淑價：{search_error}")
+                lines.append(f"  {search_error}")
                 lines.append("")
             else:
                 lines.append(f"❌ {sid}: {search_error}")
@@ -242,7 +200,6 @@ async def quick_analyze(stock_ids: list[str]) -> str:
 
 
 def _parse_float(val: str | None) -> float | None:
-    """Parse a string to float, return None on failure."""
     if not val:
         return None
     try:

@@ -3,6 +3,7 @@ name: Daily Stock Notification
 on:
   schedule:
     # Every weekday at 8:00 AM Taiwan time (UTC+8) = 0:00 UTC
+    # stock_cache is refreshed monthly by cron-scrape
     - cron: '0 0 * * 1-5'
   workflow_dispatch: # Allow manual trigger
 

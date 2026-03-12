@@ -195,11 +195,17 @@ async def handle_command(command: str, arg: str, user_id: str, reply_token: str)
         )
 
 
-async def quick_lookup_and_reply(stock_ids: list[str], line_config, user_id: str):
-    """Direct stock lookup without LLM — much faster."""
+async def quick_lookup_and_reply(app: FastAPI, stock_ids: list[str], line_config, user_id: str):
+    """Direct stock lookup without LLM. Falls back to agent if no cache data."""
     logger.info("quick_lookup start: user=%s stocks=%s", user_id, stock_ids)
     try:
         reply_text = await quick_analyze(stock_ids)
+        if reply_text is None:
+            # No cache data — fallback to agent
+            logger.info("quick_lookup fallback to agent: user=%s stocks=%s", user_id, stock_ids)
+            user_message = " ".join(stock_ids)
+            await run_agent_and_reply(app, user_message, line_config, user_id)
+            return
         logger.info("quick_lookup done: user=%s stocks=%s", user_id, stock_ids)
     except Exception as e:
         logger.error("quick_lookup error: user=%s stocks=%s err=%s", user_id, stock_ids, e)
@@ -288,7 +294,7 @@ async def line_callback(request: Request):
         if command == "quick":
             stock_ids = arg.split()
             task = asyncio.create_task(
-                quick_lookup_and_reply(stock_ids, app.state.line_config, user_id)
+                quick_lookup_and_reply(app, stock_ids, app.state.line_config, user_id)
             )
         else:
             task = asyncio.create_task(
@@ -404,8 +410,14 @@ async def test_message(body: TestRequest):
         stock_ids = arg.split()
         logger.info("/test quick start: stocks=%s", stock_ids)
         result = await quick_analyze(stock_ids)
-        logger.info("/test quick done: stocks=%s", stock_ids)
-        return {"command": "quick", "stock_ids": stock_ids, "result": result}
+        if result is None:
+            logger.info("/test quick no cache, fallback to agent: stocks=%s", stock_ids)
+            command = "query"
+            text = " ".join(stock_ids)
+            # fall through to agent below
+        else:
+            logger.info("/test quick done: stocks=%s", stock_ids)
+            return {"command": "quick", "stock_ids": stock_ids, "result": result}
 
     if command == "query":
         logger.info("/test agent start: text=%s", text[:50])
