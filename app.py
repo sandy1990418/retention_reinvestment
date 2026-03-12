@@ -329,7 +329,14 @@ async def cron_notify(request: Request):
             logger.info("cron_notify: user=%s stocks=%s", user_id, stock_ids)
             try:
                 result = await quick_analyze(stock_ids)
-                text = "📊 每日追蹤報告\n\n" + result
+                if result is None:
+                    # No cache data — fallback to agent
+                    logger.info("cron_notify fallback to agent: user=%s stocks=%s", user_id, stock_ids)
+                    agent = await get_or_create_agent(app)
+                    agent_result = await agent.run(" ".join(stock_ids), deps=app.state.deps)
+                    text = "📊 每日追蹤報告\n\n" + format_analysis(agent_result.output)
+                else:
+                    text = "📊 每日追蹤報告\n\n" + result
             except Exception as e:
                 logger.error("cron_notify error: user=%s err=%s", user_id, e)
                 text = f"每日追蹤分析失敗：{str(e)}"
